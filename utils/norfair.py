@@ -10,6 +10,8 @@ def yolo_detections_to_norfair_detections(
 ) -> List[Detection]:
     """convert detections_as_xywh to norfair detections
     """
+    assert track_points in ('centroid', 'bbox')
+
     norfair_detections: List[Detection] = []
 
     if track_points == 'centroid':
