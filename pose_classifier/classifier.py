@@ -2,8 +2,6 @@ import numpy as np
 import tensorflow as tf
 from typing import NamedTuple, Tuple
 from csv import reader
-import copy
-import itertools
 
 
 class PoseClassifier:

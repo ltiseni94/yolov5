@@ -41,11 +41,11 @@ from utils.torch_utils import select_device
 from utils.cvfpscalc import CvFpsCalc
 
 from pose_classifier.classifier import PoseClassifier
-from pose_classifier.utils import calc_bounding_rect, calc_landmark_list, pre_process_landmark  # draw_bounding_rect
+from pose_classifier.utils import calc_landmark_list, pre_process_landmark  # draw_bounding_rect
 
-from prox_classifier import proximity_score
+from prox_classifier import ProximityScore
 from grasp import GraspScore
-from norfair import Tracker, draw_tracked_boxes
+from norfair import Tracker, draw_tracked_boxes, FilterSetup
 from utils.norfair import euclidean_distance, yolo_detections_to_norfair_detections
 from typing import Dict
 
@@ -64,8 +64,12 @@ mp_styles = mp.solutions.drawing_styles
 mp_hands = mp.solutions.hands
 
 
-CLASSES_NAMES = ['bottle', 'cup']
-
+CLASSES_NAMES = {'bottle': 0.6,
+                 'cup': 0.3,
+                 'handbag': 1.0,
+                 'cell phone': 0.2,
+                 'book': 0.5,
+                 }
 
 NAMES = ['person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat', 'traffic light',
          'fire hydrant', 'stop sign', 'parking meter', 'bench', 'bird', 'cat', 'dog', 'horse', 'sheep', 'cow',
@@ -76,12 +80,16 @@ NAMES = ['person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', '
          'potted plant', 'bed', 'dining table', 'toilet', 'tv', 'laptop', 'mouse', 'remote', 'keyboard', 'cell phone',
          'microwave', 'oven', 'toaster', 'sink', 'refrigerator', 'book', 'clock', 'vase', 'scissors', 'teddy bear',
          'hair drier', 'toothbrush']  # class names
+
+
+
 NAMES_DICT = {}
 for idx, name in enumerate(NAMES):
     NAMES_DICT.update({name: idx})
-
 CLASSES = [NAMES_DICT[x] for x in CLASSES_NAMES]
-max_distance_between_points: int = 30
+
+
+max_distance_between_points: int = 100
 
 
 @torch.no_grad()
@@ -113,8 +121,10 @@ def run(
         half=False,  # use FP16 half-precision inference
         dnn=False,  # use OpenCV DNN for ONNX inference
         use_static_image_mode=False,
-        min_detection_confidence=0.7,
-        min_tracking_confidence=0.5,
+        hand_detection_confidence=0.7,
+        hand_tracking_confidence=0.5,
+        close_multiplier=1.5,
+        save_no_draw=False,
 ):
     source = str(source)
     save_img = save and not source.endswith('.txt')  # save inference images
@@ -148,18 +158,23 @@ def run(
     pose_class = PoseClassifier()
     grasp_score = GraspScore(close_weight=0.1,
                              proximity_weight=0.1,
-                             conf_thres=0.6,
-                             release_thres=0.4)
+                             conf_thres=0.7,
+                             release_thres=0.5)
+
+    proximity_score = ProximityScore(holding_samples=60)
 
     tracker = Tracker(distance_function=euclidean_distance,
                       distance_threshold=max_distance_between_points,
                       hit_inertia_min=10,
-                      hit_inertia_max=25,
+                      hit_inertia_max=80,
                       initialization_delay=0,
                       detection_threshold=0,
                       point_transience=2,
                       past_detections_length=2,
+                      filter_setup=FilterSetup(R=1.0, Q=0.1, P=1.0)
                       )
+
+    video_writer = None
 
     # Run inference
     model.warmup(imgsz=(1 if pt else bs, 3, *imgsz))  # warmup
@@ -168,12 +183,16 @@ def run(
     obj_label_dict: Dict[int, str] = {}
     obj_label = None
 
+    close_prob = 0
+    close_max_cnt = 50
+    close_cnt = close_max_cnt
+
     with mp_hands.Hands(
         static_image_mode=use_static_image_mode,
         max_num_hands=1,
         model_complexity=1,
-        min_detection_confidence=min_detection_confidence,
-        min_tracking_confidence=min_tracking_confidence
+        min_detection_confidence=hand_detection_confidence,
+        min_tracking_confidence=hand_tracking_confidence,
     ) as hands:
         fps_counter = CvFpsCalc()
         for path, im, im0s, vid_cap, s in dataset:
@@ -186,7 +205,6 @@ def run(
             hands_results = hands.process(mp_img)
 
             # pose_label = None
-            close_prob = 0
             # b_rect = None
             landmark_list = None
 
@@ -195,10 +213,18 @@ def run(
                         hands_results.multi_hand_landmarks,
                         hands_results.multi_handedness):
                     # b_rect = calc_bounding_rect(mp_img, hand_landmarks)
-                    landmark_list = calc_landmark_list(mp_img, hand_landmarks)
-                    pp_landmark_list = pre_process_landmark(landmark_list)
-                    pose_label, pose_probs = pose_class.predict(pp_landmark_list)
-                    close_prob = pose_probs[1]
+                    if handedness.classification[0].label == 'Left':
+                        landmark_list = calc_landmark_list(mp_img, hand_landmarks)
+                        pp_landmark_list = pre_process_landmark(landmark_list)
+                        pose_label, pose_probs = pose_class.predict(pp_landmark_list)
+                        close_prob = close_multiplier * pose_probs[1]
+                        if close_prob > 1:
+                            close_prob = 1
+                        close_cnt = close_max_cnt
+
+            close_cnt -= 1
+            if close_cnt < 0:
+                close_prob = 0
 
             # OBJECT DETECTOR
             im = torch.from_numpy(im).to(device)
@@ -215,20 +241,28 @@ def run(
 
             # OBJECTS TRACKING
             norfair_dets = yolo_detections_to_norfair_detections(pred[0], 'bbox')
-            tracked_objects = tracker.update(detections=norfair_dets, period=1)
+            tracked_objects = tracker.update(detections=norfair_dets, period=3)
 
-            norfair_bboxes = []
-            for obj in tracked_objects:
-                norfair_bboxes.append(obj.filter.x.squeeze()[:4])
+            norfair_bboxes = [obj.filter.x.squeeze()[:4] for obj in tracked_objects if obj.has_inertia]
 
             prox_score, obj_idx = proximity_score(norfair_bboxes, landmarks_list=landmark_list)
             grasp_prob, grasp_label = grasp_score(close_prob, prox_score)
 
-            print(obj_idx)
-            if obj_idx is not None and obj_idx not in obj_label_dict:
-                obj_label_dict.update({obj_idx: names[int(tracked_objects[obj_idx].last_detection.data[0])]})
+            try:
+                print(f'{obj_idx} - {tracked_objects[obj_idx].id}')
+            except TypeError:
+                print(f'{obj_idx}')
+            except IndexError:
+                print(f'{obj_idx}')
 
-            obj_label = obj_label_dict[obj_idx] if obj_idx is not None else obj_label
+            try:
+                if obj_idx is not None and tracked_objects[obj_idx].id not in obj_label_dict:
+                    obj_label_dict.update({tracked_objects[obj_idx].id: names[int(tracked_objects[obj_idx].last_detection.data[0])]})
+                obj_label = obj_label_dict[tracked_objects[obj_idx].id] if obj_idx is not None else obj_label
+            except IndexError:
+                pass
+            obj_weight = CLASSES_NAMES[obj_label] if obj_label in CLASSES_NAMES else 0
+
 
             # Second-stage classifier (optional)
             # pred = utils.general.apply_classifier(pred, classifier_model, im, im0s)
@@ -247,7 +281,7 @@ def run(
                 txt_path = str(save_dir / 'labels' / p.stem) + ('' if dataset.mode == 'image' else f'_{frame}')  # im.txt
                 # s += '%gx%g ' % im.shape[2:]  # print string
                 gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  # normalization gain whwh
-                imc = im0.copy() if save_crop else im0  # for save_crop
+                imc = im0.copy() if save_crop or save_no_draw else im0  # for save_crop
                 annotator = Annotator(im0, line_width=line_thickness, example=str(names))
                 if len(det):
                     # Rescale boxes from img_size to im0 size
@@ -266,7 +300,7 @@ def run(
                             with open(txt_path + '.txt', 'a') as f:
                                 f.write(('%g ' * len(line)).rstrip() % line + '\n')
 
-                        if save_img or save_crop or view_img:  # Add bbox to image
+                        if save_img or save_crop or view_img: # Add bbox to image
                             c = int(cls)  # integer class
                             label = None if hide_labels else (names[c] if hide_conf else f'{names[c]} {conf:.2f}')
                             annotator.box_label(xyxy, label, color=colors(c, True))
@@ -277,6 +311,7 @@ def run(
 
                 # Stream results
                 im0 = annotator.result()
+
                 if view_img:
                     if hands_results.multi_hand_landmarks:
                         for idx, hand_landmarks in enumerate(hands_results.multi_hand_landmarks):
@@ -292,13 +327,42 @@ def run(
                     cv2.putText(im0, f'FPS: {fps:.1f}', (20, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 0), 3)
                     cv2.putText(im0, f'FPS: {fps:.1f}', (20, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
                     if grasp_score.is_grasping:
-                        cv2.putText(im0, f'GRASP: {grasp_prob:.2f} - {obj_label}', (20, 50),
+                        cv2.putText(im0, f'GRASP: {grasp_prob:.2f} - {obj_label}: {obj_weight:.1f} kg', (20, 50),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 0), 3)
-                        cv2.putText(im0, f'GRASP: {grasp_prob:.2f} - {obj_label}', (20, 50),
+                        cv2.putText(im0, f'GRASP: {grasp_prob:.2f} - {obj_label}: {obj_weight:.1f} kg', (20, 50),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
                     else:
-                        cv2.putText(im0, f'GRASP: {grasp_prob:.2f} - {obj_label}', (20, 50),
+                        cv2.putText(im0, f'GRASP: {grasp_prob:.2f}', (20, 50),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 0), 2)
+                    cv2.putText(im0, f'PROX: {prox_score:.2f}', (20, 80),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 0), 3)
+                    cv2.putText(im0, f'PROX: {prox_score:.2f}', (20, 80),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
+                    cv2.putText(im0, f'CLOSE: {close_prob:.2f}', (20, 110),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 0), 3)
+                    cv2.putText(im0, f'CLOSE: {close_prob:.2f}', (20, 110),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
+
+                    if save_no_draw:
+                        cv2.putText(imc, f'FPS: {fps:.1f}', (20, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 0), 3)
+                        cv2.putText(imc, f'FPS: {fps:.1f}', (20, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255),
+                                    2)
+                        if grasp_score.is_grasping:
+                            cv2.putText(imc, f'GRASP: {grasp_prob:.2f} - {obj_label}: {obj_weight:.1f} kg', (20, 50),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 0), 3)
+                            cv2.putText(imc, f'GRASP: {grasp_prob:.2f} - {obj_label}: {obj_weight:.1f} kg', (20, 50),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
+                        else:
+                            cv2.putText(imc, f'GRASP: {grasp_prob:.2f}', (20, 50),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 0), 2)
+                        cv2.putText(imc, f'PROX: {prox_score:.2f}', (20, 80),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 0), 3)
+                        cv2.putText(imc, f'PROX: {prox_score:.2f}', (20, 80),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
+                        cv2.putText(imc, f'CLOSE: {close_prob:.2f}', (20, 110),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 0), 3)
+                        cv2.putText(imc, f'CLOSE: {close_prob:.2f}', (20, 110),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
 
                     draw_tracked_boxes(im0, tracked_objects, (255, 0, 0), 1, 1.5, 2)
 
@@ -323,6 +387,13 @@ def run(
                             save_path = str(Path(save_path).with_suffix('.mp4'))  # force *.mp4 suffix on results videos
                             vid_writer[i] = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
                         vid_writer[i].write(im0)
+
+                if save_no_draw:
+                    if video_writer is None:
+                        video_path = str(Path(save_path)) + '_nodraw.mp4'
+                        video_writer = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
+                    video_writer.write(imc)
+
 
             # Print time (inference-only)
             # LOGGER.info(f'{s}Done. ({t3 - t2:.3f}s)')
@@ -366,8 +437,9 @@ def parse_opt():
     parser.add_argument('--half', action='store_true', help='use FP16 half-precision inference')
     parser.add_argument('--dnn', action='store_true', help='use OpenCV DNN for ONNX inference')
     parser.add_argument('--use_static_image_mode', action='store_true')
-    parser.add_argument("--min_detection_confidence", help='min_detection_confidence', type=float, default=0.6)
-    parser.add_argument("--min_tracking_confidence", help='min_tracking_confidence', type=float, default=0.35)
+    parser.add_argument("--hand-detection-confidence", help='min_detection_confidence', type=float, default=0.6)
+    parser.add_argument("--hand-tracking-confidence", help='min_tracking_confidence', type=float, default=0.35)
+    parser.add_argument("--save-no-draw", help='save video without debugging drawing', action='store_true', default=False)
     opt = parser.parse_args()
     opt.imgsz *= 2 if len(opt.imgsz) == 1 else 1  # expand
     print_args(vars(opt))
