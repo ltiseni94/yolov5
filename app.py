@@ -365,9 +365,8 @@ def run(
                     #             cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
                     #
                     if save_no_draw:
-                        cv2.putText(imc, f'FPS: {fps:.1f}', (im0.shape[1] - 100, im0.shape[0] - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 0), 3)
-                        cv2.putText(imc, f'FPS: {fps:.1f}', (im0.shape[1] - 100, im0.shape[0] - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255),
-                                    2)
+                        cv2.putText(imc, f'FPS: {fps:.1f}', (im0.shape[1] - 100, im0.shape[0] - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3)
+                        cv2.putText(imc, f'FPS: {fps:.1f}', (im0.shape[1] - 100, im0.shape[0] - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
                         imc = score_bar(
                             output_weight / MAX_WEIGHT,
                             imc,

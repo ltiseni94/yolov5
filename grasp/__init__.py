@@ -39,7 +39,7 @@ class GraspScore:
 
 
 class Smoother:
-    def __init__(self, slope: float = 0.4):
+    def __init__(self, slope: float = 1.5):
         self.slope = slope
         self.time = time.time()
         self.value = 0
