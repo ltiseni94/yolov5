@@ -44,8 +44,8 @@ from pose_classifier.classifier import PoseClassifier
 from pose_classifier.utils import calc_landmark_list, pre_process_landmark  # draw_bounding_rect
 
 from prox_classifier import ProximityScore
-from grasp import GraspScore
-from norfair import Tracker, draw_tracked_boxes, FilterSetup
+from grasp import GraspScore, score_bar, Smoother
+from norfair import Tracker, FilterSetup  # draw_tracked_boxes
 from utils.norfair import euclidean_distance, yolo_detections_to_norfair_detections
 from typing import Dict
 
@@ -63,13 +63,33 @@ mp_drawing = mp.solutions.drawing_utils
 mp_styles = mp.solutions.drawing_styles
 mp_hands = mp.solutions.hands
 
+CLASSES_NAMES = {
+    'bottle': 1.0,
+    'cup': 0.4,
+    'handbag': 1.5,
+    'cell phone': 0.25,
+    'book': 0.5,
+    'fork': 0.1,
+    # 'sports ball': 0.3,
+    # 'wine glass': 0.2,
+    'spoon': 0.1,
+    # 'bowl': 0.7,
+    'apple': 0.3,
+    # 'banana': 0.3,
+    # 'orange': 0.4,
+    # 'carrot': 0.1,
+    # 'remote': 0.2,
+    # 'scissors': 0.1,
+    # 'hair drier': 0.5,
+    # 'laptop': 1.5,
+    # 'donut': 0.2,
+    # 'sandwich': 0.4,
+    # 'backpack': 1.5,
+}
 
-CLASSES_NAMES = {'bottle': 0.6,
-                 'cup': 0.3,
-                 'handbag': 1.0,
-                 'cell phone': 0.2,
-                 'book': 0.5,
-                 }
+
+MAX_WEIGHT = max(CLASSES_NAMES.values())
+
 
 NAMES = ['person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat', 'traffic light',
          'fire hydrant', 'stop sign', 'parking meter', 'bench', 'bird', 'cat', 'dog', 'horse', 'sheep', 'cow',
@@ -124,6 +144,7 @@ def run(
         hand_detection_confidence=0.7,
         hand_tracking_confidence=0.5,
         close_multiplier=1.5,
+        show_debug=False,
         save_no_draw=False,
 ):
     source = str(source)
@@ -160,9 +181,8 @@ def run(
                              proximity_weight=0.1,
                              conf_thres=0.7,
                              release_thres=0.5)
-
     proximity_score = ProximityScore(holding_samples=60)
-
+    weight_smoother = Smoother()
     tracker = Tracker(distance_function=euclidean_distance,
                       distance_threshold=max_distance_between_points,
                       hit_inertia_min=10,
@@ -184,7 +204,7 @@ def run(
     obj_label = None
 
     close_prob = 0
-    close_max_cnt = 50
+    close_max_cnt = 15
     close_cnt = close_max_cnt
 
     with mp_hands.Hands(
@@ -248,12 +268,12 @@ def run(
             prox_score, obj_idx = proximity_score(norfair_bboxes, landmarks_list=landmark_list)
             grasp_prob, grasp_label = grasp_score(close_prob, prox_score)
 
-            try:
-                print(f'{obj_idx} - {tracked_objects[obj_idx].id}')
-            except TypeError:
-                print(f'{obj_idx}')
-            except IndexError:
-                print(f'{obj_idx}')
+            # try:
+            #     print(f'{obj_idx} - {tracked_objects[obj_idx].id}')
+            # except TypeError:
+            #     print(f'{obj_idx}')
+            # except IndexError:
+            #     print(f'{obj_idx}')
 
             try:
                 if obj_idx is not None and tracked_objects[obj_idx].id not in obj_label_dict:
@@ -262,7 +282,8 @@ def run(
             except IndexError:
                 pass
             obj_weight = CLASSES_NAMES[obj_label] if obj_label in CLASSES_NAMES else 0
-
+            # print(obj_weight)
+            output_weight = weight_smoother(obj_weight if grasp_score.is_grasping else 0)
 
             # Second-stage classifier (optional)
             # pred = utils.general.apply_classifier(pred, classifier_model, im, im0s)
@@ -324,47 +345,127 @@ def run(
                             )
                     # if b_rect is not None:
                     #     im0 = draw_bounding_rect(im0, b_rect, pose_label)
-                    cv2.putText(im0, f'FPS: {fps:.1f}', (20, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 0), 3)
-                    cv2.putText(im0, f'FPS: {fps:.1f}', (20, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
-                    if grasp_score.is_grasping:
-                        cv2.putText(im0, f'GRASP: {grasp_prob:.2f} - {obj_label}: {obj_weight:.1f} kg', (20, 50),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 0), 3)
-                        cv2.putText(im0, f'GRASP: {grasp_prob:.2f} - {obj_label}: {obj_weight:.1f} kg', (20, 50),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
-                    else:
-                        cv2.putText(im0, f'GRASP: {grasp_prob:.2f}', (20, 50),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 0), 2)
-                    cv2.putText(im0, f'PROX: {prox_score:.2f}', (20, 80),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 0), 3)
-                    cv2.putText(im0, f'PROX: {prox_score:.2f}', (20, 80),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
-                    cv2.putText(im0, f'CLOSE: {close_prob:.2f}', (20, 110),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 0), 3)
-                    cv2.putText(im0, f'CLOSE: {close_prob:.2f}', (20, 110),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
-
+                    cv2.putText(im0, f'fps: {fps:.1f}', (im0.shape[1] - 100, im0.shape[0] - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3)
+                    cv2.putText(im0, f'fps: {fps:.1f}', (im0.shape[1] - 100, im0.shape[0] - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                    # if grasp_score.is_grasping:
+                    #     cv2.putText(im0, f'GRASP: {grasp_prob:.2f} - {obj_label}: {obj_weight:.1f} kg', (20, 50),
+                    #                 cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 0), 3)
+                    #     cv2.putText(im0, f'GRASP: {grasp_prob:.2f} - {obj_label}: {obj_weight:.1f} kg', (20, 50),
+                    #                 cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
+                    # else:
+                    #     cv2.putText(im0, f'GRASP: {grasp_prob:.2f}', (20, 50),
+                    #                 cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 0), 2)
+                    # cv2.putText(im0, f'PROX: {prox_score:.2f}', (20, 80),
+                    #             cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 0), 3)
+                    # cv2.putText(im0, f'PROX: {prox_score:.2f}', (20, 80),
+                    #             cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
+                    # cv2.putText(im0, f'CLOSE: {close_prob:.2f}', (20, 110),
+                    #             cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 0), 3)
+                    # cv2.putText(im0, f'CLOSE: {close_prob:.2f}', (20, 110),
+                    #             cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
+                    #
                     if save_no_draw:
-                        cv2.putText(imc, f'FPS: {fps:.1f}', (20, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 0), 3)
-                        cv2.putText(imc, f'FPS: {fps:.1f}', (20, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255),
+                        cv2.putText(imc, f'FPS: {fps:.1f}', (im0.shape[1] - 100, im0.shape[0] - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 0), 3)
+                        cv2.putText(imc, f'FPS: {fps:.1f}', (im0.shape[1] - 100, im0.shape[0] - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255),
                                     2)
-                        if grasp_score.is_grasping:
-                            cv2.putText(imc, f'GRASP: {grasp_prob:.2f} - {obj_label}: {obj_weight:.1f} kg', (20, 50),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 0), 3)
-                            cv2.putText(imc, f'GRASP: {grasp_prob:.2f} - {obj_label}: {obj_weight:.1f} kg', (20, 50),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
-                        else:
-                            cv2.putText(imc, f'GRASP: {grasp_prob:.2f}', (20, 50),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 0), 2)
-                        cv2.putText(imc, f'PROX: {prox_score:.2f}', (20, 80),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 0), 3)
-                        cv2.putText(imc, f'PROX: {prox_score:.2f}', (20, 80),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
-                        cv2.putText(imc, f'CLOSE: {close_prob:.2f}', (20, 110),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 0), 3)
-                        cv2.putText(imc, f'CLOSE: {close_prob:.2f}', (20, 110),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
+                        imc = score_bar(
+                            output_weight / MAX_WEIGHT,
+                            imc,
+                            lower_corner=(5, 30),
+                            width=24,
+                            height=200,
+                            custom_label=f'{obj_label}' if grasp_score.is_grasping else f'No object',
+                            horizontal=True,
+                            char_size=0.6,
+                            with_centered_fill_value=True,
+                            centered_custom_label=f'{output_weight:.2f} kg',
+                            colormap=True,
+                            low_color=120,
+                            high_color=90,
+                        )
+                        imc = score_bar(
+                            grasp_prob,
+                            imc,
+                            lower_corner=(5, 60),
+                            width=24,
+                            height=200,
+                            custom_label=f'Grasp',
+                            horizontal=True,
+                            char_size=0.6,
+                            with_centered_fill_value=True,
+                        )
+                    #     if grasp_score.is_grasping:
+                    #         cv2.putText(imc, f'GRASP: {grasp_prob:.2f} - {obj_label}: {obj_weight:.1f} kg', (20, 50),
+                    #                     cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 0), 3)
+                    #         cv2.putText(imc, f'GRASP: {grasp_prob:.2f} - {obj_label}: {obj_weight:.1f} kg', (20, 50),
+                    #                     cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
+                    #     else:
+                    #         cv2.putText(imc, f'GRASP: {grasp_prob:.2f}', (20, 50),
+                    #                     cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 0), 2)
+                    #     cv2.putText(imc, f'PROX: {prox_score:.2f}', (20, 80),
+                    #                 cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 0), 3)
+                    #     cv2.putText(imc, f'PROX: {prox_score:.2f}', (20, 80),
+                    #                 cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
+                    #     cv2.putText(imc, f'CLOSE: {close_prob:.2f}', (20, 110),
+                    #                 cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 0), 3)
+                    #     cv2.putText(imc, f'CLOSE: {close_prob:.2f}', (20, 110),
+                    #                 cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
 
-                    draw_tracked_boxes(im0, tracked_objects, (255, 0, 0), 1, 1.5, 2)
+                    im0 = score_bar(
+                        output_weight / MAX_WEIGHT,
+                        im0,
+                        lower_corner=(5, 30),
+                        width=24,
+                        height=200,
+                        custom_label=f'{obj_label}' if grasp_score.is_grasping else f'No object',
+                        horizontal=True,
+                        char_size=0.6,
+                        with_centered_fill_value=True,
+                        centered_custom_label=f'{output_weight:.2f} kg',
+                        colormap=True,
+                        low_color=120,
+                        high_color=90,
+                    )
+                    im0 = score_bar(
+                        grasp_prob,
+                        im0,
+                        lower_corner=(5, 60),
+                        width=24,
+                        height=200,
+                        custom_label=f'Grasp',
+                        horizontal=True,
+                        char_size=0.6,
+                        with_centered_fill_value=True,
+                    )
+                    if show_debug:
+                        im0 = score_bar(
+                            prox_score,
+                            im0,
+                            lower_corner=(5, 90),
+                            width=24,
+                            height=200,
+                            custom_label='Prox',
+                            horizontal=True,
+                            char_size=0.6,
+                            with_centered_fill_value=True,
+                            use_value=True,
+                            single_color=(100, 255, 100),
+                        )
+                        im0 = score_bar(
+                            close_prob,
+                            im0,
+                            lower_corner=(5, 120),
+                            width=24,
+                            height=200,
+                            custom_label='Close',
+                            horizontal=True,
+                            char_size=0.6,
+                            with_centered_fill_value=True,
+                            use_value=True,
+                            single_color=(255, 100, 100),
+                        )
+
+                    # draw_tracked_boxes(im0, tracked_objects, (255, 0, 0), 1, 1.5, 2)
 
                     cv2.imshow(str(p), im0)
                     cv2.waitKey(1)  # 1 millisecond
@@ -440,6 +541,7 @@ def parse_opt():
     parser.add_argument("--hand-detection-confidence", help='min_detection_confidence', type=float, default=0.6)
     parser.add_argument("--hand-tracking-confidence", help='min_tracking_confidence', type=float, default=0.35)
     parser.add_argument("--save-no-draw", help='save video without debugging drawing', action='store_true', default=False)
+    parser.add_argument("--show-debug", help='show close and prox value with bars on screen', action='store_true', default=False)
     opt = parser.parse_args()
     opt.imgsz *= 2 if len(opt.imgsz) == 1 else 1  # expand
     print_args(vars(opt))
