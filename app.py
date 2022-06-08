@@ -26,6 +26,11 @@ Usage - formats:
 
 import argparse
 import os
+import socket
+import struct
+import time
+from queue import Queue, Full
+from threading import Thread
 import sys
 from pathlib import Path
 
@@ -102,10 +107,9 @@ NAMES = ['person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', '
          'hair drier', 'toothbrush']  # class names
 
 
-
 NAMES_DICT = {}
-for idx, name in enumerate(NAMES):
-    NAMES_DICT.update({name: idx})
+for idx, obj_name in enumerate(NAMES):
+    NAMES_DICT.update({obj_name: idx})
 CLASSES = [NAMES_DICT[x] for x in CLASSES_NAMES]
 
 
@@ -114,6 +118,7 @@ max_distance_between_points: int = 100
 
 @torch.no_grad()
 def run(
+        output_queue,
         weights=ROOT / 'yolov5s.pt',  # model.pt path(s)
         source=ROOT / 'data/images',  # file/dir/URL/glob, 0 for webcam
         data=ROOT / 'data/coco128.yaml',  # dataset.yaml path
@@ -284,6 +289,11 @@ def run(
             obj_weight = CLASSES_NAMES[obj_label] if obj_label in CLASSES_NAMES else 0
             # print(obj_weight)
             output_weight = weight_smoother(obj_weight if grasp_score.is_grasping else 0)
+
+            try:
+                output_queue.put(output_weight, block=False)
+            except Full:
+                print('WARNING: queue is full!')
 
             # Second-stage classifier (optional)
             # pred = utils.general.apply_classifier(pred, classifier_model, im, im0s)
@@ -547,11 +557,34 @@ def parse_opt():
     return opt
 
 
-def main(opt):
+def send_result(input_queue: Queue, rate: float):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    period = 1 / rate
+    while True:
+        start_time = time.time()
+        val = None
+        while not input_queue.empty():
+            val = input_queue.get()
+        if val is not None:
+            sock.sendto(struct.pack('f', val), ('127.0.0.1', 11000))
+        elapsed_time = time.time() - start_time
+        if elapsed_time - start_time < period:
+            time.sleep(period - elapsed_time)
+
+
+def main(output_queue, opt):
     check_requirements(exclude=('tensorboard', 'thop'))
-    run(**vars(opt))
+    run(output_queue, **vars(opt))
 
 
 if __name__ == "__main__":
     args = parse_opt()
-    main(args)
+    data_queue = Queue(10)
+    t = Thread(
+        target=send_result,
+        name='send_data_thread',
+        args=(data_queue, 20.0),
+        daemon=True,
+    )
+    t.start()
+    main(data_queue, args)
