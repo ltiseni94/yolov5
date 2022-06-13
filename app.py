@@ -151,6 +151,7 @@ def run(
         close_multiplier=1.5,
         show_debug=False,
         save_no_draw=False,
+        server=True,
 ):
     source = str(source)
     save_img = save and not source.endswith('.txt')  # save inference images
@@ -186,8 +187,7 @@ def run(
                              proximity_weight=0.1,
                              conf_thres=0.7,
                              release_thres=0.5)
-    proximity_score = ProximityScore(holding_samples=60)
-    weight_smoother = Smoother()
+    proximity_score = ProximityScore(holding_samples=30)
     tracker = Tracker(distance_function=euclidean_distance,
                       distance_threshold=max_distance_between_points,
                       hit_inertia_min=10,
@@ -198,6 +198,7 @@ def run(
                       past_detections_length=2,
                       filter_setup=FilterSetup(R=1.0, Q=0.1, P=1.0)
                       )
+    smoother = Smoother()
 
     video_writer = None
 
@@ -209,7 +210,7 @@ def run(
     obj_label = None
 
     close_prob = 0
-    close_max_cnt = 15
+    close_max_cnt = 10
     close_cnt = close_max_cnt
 
     with mp_hands.Hands(
@@ -229,10 +230,7 @@ def run(
                 mp_img[:, :, i] = im[0, i, :, :]
             hands_results = hands.process(mp_img)
 
-            # pose_label = None
-            # b_rect = None
             landmark_list = None
-
             if hands_results.multi_hand_landmarks is not None:
                 for hand_landmarks, handedness in zip(
                         hands_results.multi_hand_landmarks,
@@ -273,27 +271,22 @@ def run(
             prox_score, obj_idx = proximity_score(norfair_bboxes, landmarks_list=landmark_list)
             grasp_prob, grasp_label = grasp_score(close_prob, prox_score)
 
-            # try:
-            #     print(f'{obj_idx} - {tracked_objects[obj_idx].id}')
-            # except TypeError:
-            #     print(f'{obj_idx}')
-            # except IndexError:
-            #     print(f'{obj_idx}')
-
             try:
                 if obj_idx is not None and tracked_objects[obj_idx].id not in obj_label_dict:
-                    obj_label_dict.update({tracked_objects[obj_idx].id: names[int(tracked_objects[obj_idx].last_detection.data[0])]})
+                    obj_label_dict.update({
+                        tracked_objects[obj_idx].id: names[int(tracked_objects[obj_idx].last_detection.data[0])]
+                    })
                 obj_label = obj_label_dict[tracked_objects[obj_idx].id] if obj_idx is not None else obj_label
             except IndexError:
                 pass
             obj_weight = CLASSES_NAMES[obj_label] if obj_label in CLASSES_NAMES else 0
-            # print(obj_weight)
-            output_weight = weight_smoother(obj_weight if grasp_score.is_grasping else 0)
+            output_weight = obj_weight if grasp_score.is_grasping else 0
+            visualized_weight = smoother(output_weight)
 
             try:
                 output_queue.put(output_weight, block=False)
             except Full:
-                print('WARNING: queue is full!')
+                pass
 
             # Second-stage classifier (optional)
             # pred = utils.general.apply_classifier(pred, classifier_model, im, im0s)
@@ -318,11 +311,6 @@ def run(
                     # Rescale boxes from img_size to im0 size
                     det[:, :4] = scale_coords(im.shape[2:], det[:, :4], im0.shape).round()
 
-                    # Print results
-                    # for c in det[:, -1].unique():
-                    #     n = (det[:, -1] == c).sum()  # detections per class
-                    #     s += f"{n} {names[int(c)]}{'s' * (n > 1)}, "  # add to string
-
                     # Write results
                     for *xyxy, conf, cls in reversed(det):
                         if save_txt:  # Write to file
@@ -331,7 +319,7 @@ def run(
                             with open(txt_path + '.txt', 'a') as f:
                                 f.write(('%g ' * len(line)).rstrip() % line + '\n')
 
-                        if save_img or save_crop or view_img: # Add bbox to image
+                        if save_img or save_crop or view_img:  # Add bbox to image
                             c = int(cls)  # integer class
                             label = None if hide_labels else (names[c] if hide_conf else f'{names[c]} {conf:.2f}')
                             annotator.box_label(xyxy, label, color=colors(c, True))
@@ -353,32 +341,15 @@ def run(
                                 mp_styles.get_default_hand_landmarks_style(),
                                 mp_styles.get_default_hand_connections_style(),
                             )
-                    # if b_rect is not None:
-                    #     im0 = draw_bounding_rect(im0, b_rect, pose_label)
+
                     cv2.putText(im0, f'fps: {fps:.1f}', (im0.shape[1] - 100, im0.shape[0] - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3)
                     cv2.putText(im0, f'fps: {fps:.1f}', (im0.shape[1] - 100, im0.shape[0] - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-                    # if grasp_score.is_grasping:
-                    #     cv2.putText(im0, f'GRASP: {grasp_prob:.2f} - {obj_label}: {obj_weight:.1f} kg', (20, 50),
-                    #                 cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 0), 3)
-                    #     cv2.putText(im0, f'GRASP: {grasp_prob:.2f} - {obj_label}: {obj_weight:.1f} kg', (20, 50),
-                    #                 cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
-                    # else:
-                    #     cv2.putText(im0, f'GRASP: {grasp_prob:.2f}', (20, 50),
-                    #                 cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 0), 2)
-                    # cv2.putText(im0, f'PROX: {prox_score:.2f}', (20, 80),
-                    #             cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 0), 3)
-                    # cv2.putText(im0, f'PROX: {prox_score:.2f}', (20, 80),
-                    #             cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
-                    # cv2.putText(im0, f'CLOSE: {close_prob:.2f}', (20, 110),
-                    #             cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 0), 3)
-                    # cv2.putText(im0, f'CLOSE: {close_prob:.2f}', (20, 110),
-                    #             cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
-                    #
+
                     if save_no_draw:
                         cv2.putText(imc, f'FPS: {fps:.1f}', (im0.shape[1] - 100, im0.shape[0] - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3)
                         cv2.putText(imc, f'FPS: {fps:.1f}', (im0.shape[1] - 100, im0.shape[0] - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
                         imc = score_bar(
-                            output_weight / MAX_WEIGHT,
+                            visualized_weight / MAX_WEIGHT,
                             imc,
                             lower_corner=(5, 30),
                             width=24,
@@ -387,7 +358,7 @@ def run(
                             horizontal=True,
                             char_size=0.6,
                             with_centered_fill_value=True,
-                            centered_custom_label=f'{output_weight:.2f} kg',
+                            centered_custom_label=f'{visualized_weight:.2f} kg',
                             colormap=True,
                             low_color=120,
                             high_color=90,
@@ -403,25 +374,9 @@ def run(
                             char_size=0.6,
                             with_centered_fill_value=True,
                         )
-                    #     if grasp_score.is_grasping:
-                    #         cv2.putText(imc, f'GRASP: {grasp_prob:.2f} - {obj_label}: {obj_weight:.1f} kg', (20, 50),
-                    #                     cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 0), 3)
-                    #         cv2.putText(imc, f'GRASP: {grasp_prob:.2f} - {obj_label}: {obj_weight:.1f} kg', (20, 50),
-                    #                     cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
-                    #     else:
-                    #         cv2.putText(imc, f'GRASP: {grasp_prob:.2f}', (20, 50),
-                    #                     cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 0), 2)
-                    #     cv2.putText(imc, f'PROX: {prox_score:.2f}', (20, 80),
-                    #                 cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 0), 3)
-                    #     cv2.putText(imc, f'PROX: {prox_score:.2f}', (20, 80),
-                    #                 cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
-                    #     cv2.putText(imc, f'CLOSE: {close_prob:.2f}', (20, 110),
-                    #                 cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 0), 3)
-                    #     cv2.putText(imc, f'CLOSE: {close_prob:.2f}', (20, 110),
-                    #                 cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
 
                     im0 = score_bar(
-                        output_weight / MAX_WEIGHT,
+                        visualized_weight / MAX_WEIGHT,
                         im0,
                         lower_corner=(5, 30),
                         width=24,
@@ -430,7 +385,7 @@ def run(
                         horizontal=True,
                         char_size=0.6,
                         with_centered_fill_value=True,
-                        centered_custom_label=f'{output_weight:.2f} kg',
+                        centered_custom_label=f'{visualized_weight:.2f} kg',
                         colormap=True,
                         low_color=120,
                         high_color=90,
@@ -446,6 +401,7 @@ def run(
                         char_size=0.6,
                         with_centered_fill_value=True,
                     )
+
                     if show_debug:
                         im0 = score_bar(
                             prox_score,
@@ -475,7 +431,6 @@ def run(
                         )
 
                     # draw_tracked_boxes(im0, tracked_objects, (255, 0, 0), 1, 1.5, 2)
-
                     cv2.imshow(str(p), im0)
                     cv2.waitKey(1)  # 1 millisecond
 
@@ -503,7 +458,6 @@ def run(
                         video_path = str(Path(save_path)) + '_nodraw.mp4'
                         video_writer = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
                     video_writer.write(imc)
-
 
             # Print time (inference-only)
             # LOGGER.info(f'{s}Done. ({t3 - t2:.3f}s)')
@@ -551,6 +505,7 @@ def parse_opt():
     parser.add_argument("--hand-tracking-confidence", help='min_tracking_confidence', type=float, default=0.35)
     parser.add_argument("--save-no-draw", help='save video without debugging drawing', action='store_true', default=False)
     parser.add_argument("--show-debug", help='show close and prox value with bars on screen', action='store_true', default=False)
+    parser.add_argument("--server", help='send out result on 127.0.0.1, port 11000', action='store_true', default=False)
     opt = parser.parse_args()
     opt.imgsz *= 2 if len(opt.imgsz) == 1 else 1  # expand
     print_args(vars(opt))
@@ -560,16 +515,22 @@ def parse_opt():
 def send_result(input_queue: Queue, rate: float):
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     period = 1 / rate
+    cnt = 0
     while True:
         start_time = time.time()
         val = None
         while not input_queue.empty():
             val = input_queue.get()
         if val is not None:
+            cnt += 1
             sock.sendto(struct.pack('f', val), ('127.0.0.1', 11000))
+            if cnt % int(rate) == 0:
+                print(f'[{time.strftime("%H:%M:%S")}] Weight: {val:.3f} kg')
         elapsed_time = time.time() - start_time
-        if elapsed_time - start_time < period:
+        try:
             time.sleep(period - elapsed_time)
+        except ValueError:
+            pass
 
 
 def main(output_queue, opt):
@@ -579,12 +540,13 @@ def main(output_queue, opt):
 
 if __name__ == "__main__":
     args = parse_opt()
-    data_queue = Queue(10)
-    t = Thread(
-        target=send_result,
-        name='send_data_thread',
-        args=(data_queue, 20.0),
-        daemon=True,
-    )
-    t.start()
+    data_queue = Queue()
+    if args.server:
+        t = Thread(
+            target=send_result,
+            name='send_data_thread',
+            args=(data_queue, 10.0),
+            daemon=True,
+        )
+        t.start()
     main(data_queue, args)

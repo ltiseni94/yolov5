@@ -39,18 +39,22 @@ class GraspScore:
 
 
 class Smoother:
-    def __init__(self, slope: float = 1.5):
+    def __init__(self, slope: float = 1.0):
         self.slope = slope
         self.time = time.time()
         self.value = 0
 
     def __call__(self, ref: float):
         new_time = time.time()
+
+        # Avoid excessive dt if the weight is updated after a long time
         if new_time - self.time > (1.0 / 10):
             self.time = new_time
             return self.value
+
         dt = new_time - self.time
         self.time = new_time
+
         if ref > self.value:
             self.value += self.slope * dt
             if self.value > ref:
@@ -59,6 +63,7 @@ class Smoother:
             self.value -= self.slope * dt
             if self.value < ref:
                 self.value = ref
+
         return self.value
 
 
@@ -82,7 +87,10 @@ def score_bar(
         char_size: float = 0.5,
         custom_label: Optional[str] = None,
 ):
-    assert 0 <= fill <= 1
+    if fill < 0:
+        fill = 0
+    elif fill > 1:
+        fill = 1
 
     if type(lower_corner) is int:
         lower_corner = (lower_corner, img.shape[0] - lower_corner)
