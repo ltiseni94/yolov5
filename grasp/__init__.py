@@ -68,23 +68,23 @@ class Smoother:
 
 
 def score_bar(
-        fill: float,
         img: np.ndarray,
+        fill: float,
         *,
         lower_corner: Union[Tuple[int, int], int] = 20,
-        width: int = 20,
-        height: int = 300,
+        width: int = 24,
+        height: int = 200,
         line_thickness: int = 2,
-        horizontal: bool = False,
+        horizontal: bool = True,
         colormap: bool = True,
         use_value: bool = False,
         low_color: Optional[int] = 40,
         high_color: Optional[int] = 10,
         single_color: Tuple[int, int, int] = (255, 255, 255),
-        with_centered_fill_value: bool = False,
+        with_centered_fill_value: bool = True,
         centered_custom_label: Optional[str] = None,
         with_label: bool = True,
-        char_size: float = 0.5,
+        char_size: float = 0.6,
         custom_label: Optional[str] = None,
 ):
     if fill < 0:
@@ -221,4 +221,16 @@ def score_bar(
             2,
         )
 
+    return img
+
+
+def nice_text(
+        img: np.ndarray,
+        text: str,
+        position: Tuple[int, int],
+) -> np.ndarray:
+    cv2.putText(img, text, position,
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3)
+    cv2.putText(img, text, position,
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
     return img

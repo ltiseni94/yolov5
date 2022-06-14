@@ -29,6 +29,7 @@ import os
 import socket
 import struct
 import time
+import csv
 from queue import Queue, Full
 from threading import Thread
 import sys
@@ -49,14 +50,13 @@ from pose_classifier.classifier import PoseClassifier
 from pose_classifier.utils import calc_landmark_list, pre_process_landmark  # draw_bounding_rect
 
 from prox_classifier import ProximityScore
-from grasp import GraspScore, score_bar, Smoother
+from grasp import GraspScore, score_bar, Smoother, nice_text
 from norfair import Tracker, FilterSetup  # draw_tracked_boxes
 from utils.norfair import euclidean_distance, yolo_detections_to_norfair_detections
-from typing import Dict
+from typing import Dict, List, Optional
 
 import mediapipe as mp
 import numpy as np
-
 
 FILE = Path(__file__).resolve()
 ROOT = FILE.parents[0]  # YOLOv5 root directory
@@ -68,6 +68,9 @@ mp_drawing = mp.solutions.drawing_utils
 mp_styles = mp.solutions.drawing_styles
 mp_hands = mp.solutions.hands
 
+OUTPUT_IP = '127.0.0.1'
+OUTPUT_PORT = 11000
+
 CLASSES_NAMES = {
     'bottle': 1.0,
     'cup': 0.4,
@@ -78,10 +81,10 @@ CLASSES_NAMES = {
     # 'sports ball': 0.3,
     # 'wine glass': 0.2,
     'spoon': 0.1,
-    # 'bowl': 0.7,
+    'bowl': 0.7,
     'apple': 0.3,
-    # 'banana': 0.3,
-    # 'orange': 0.4,
+    'banana': 0.3,
+    'orange': 0.4,
     # 'carrot': 0.1,
     # 'remote': 0.2,
     # 'scissors': 0.1,
@@ -92,9 +95,7 @@ CLASSES_NAMES = {
     # 'backpack': 1.5,
 }
 
-
 MAX_WEIGHT = max(CLASSES_NAMES.values())
-
 
 NAMES = ['person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat', 'traffic light',
          'fire hydrant', 'stop sign', 'parking meter', 'bench', 'bird', 'cat', 'dog', 'horse', 'sheep', 'cow',
@@ -106,12 +107,10 @@ NAMES = ['person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', '
          'microwave', 'oven', 'toaster', 'sink', 'refrigerator', 'book', 'clock', 'vase', 'scissors', 'teddy bear',
          'hair drier', 'toothbrush']  # class names
 
-
 NAMES_DICT = {}
-for idx, obj_name in enumerate(NAMES):
-    NAMES_DICT.update({obj_name: idx})
+for index, obj_name in enumerate(NAMES):
+    NAMES_DICT.update({obj_name: index})
 CLASSES = [NAMES_DICT[x] for x in CLASSES_NAMES]
-
 
 max_distance_between_points: int = 100
 
@@ -151,6 +150,7 @@ def run(
         close_multiplier=1.5,
         show_debug=False,
         save_no_draw=False,
+        save_label_file=False,
         server=True,
 ):
     source = str(source)
@@ -180,7 +180,8 @@ def run(
     else:
         dataset = LoadImages(source, img_size=imgsz, stride=stride, auto=pt)
         bs = 1  # batch_size
-    vid_path, vid_writer = [None] * bs, [None] * bs
+    vid_path: List[Optional[str]] = [None] * bs
+    vid_writer: List[Optional[cv2.VideoWriter]] = [None] * bs
 
     pose_class = PoseClassifier()
     grasp_score = GraspScore(close_weight=0.1,
@@ -201,6 +202,8 @@ def run(
     smoother = Smoother()
 
     video_writer = None
+    label_file = None
+    csv_writer = None
 
     # Run inference
     model.warmup(imgsz=(1 if pt else bs, 3, *imgsz))  # warmup
@@ -213,254 +216,252 @@ def run(
     close_max_cnt = 10
     close_cnt = close_max_cnt
 
-    with mp_hands.Hands(
-        static_image_mode=use_static_image_mode,
-        max_num_hands=1,
-        model_complexity=1,
-        min_detection_confidence=hand_detection_confidence,
-        min_tracking_confidence=hand_tracking_confidence,
-    ) as hands:
-        fps_counter = CvFpsCalc()
-        for path, im, im0s, vid_cap, s in dataset:
+    try:
+        with mp_hands.Hands(
+                static_image_mode=use_static_image_mode,
+                max_num_hands=1,
+                model_complexity=1,
+                min_detection_confidence=hand_detection_confidence,
+                min_tracking_confidence=hand_tracking_confidence,
+        ) as hands:
+            fps_counter = CvFpsCalc()
+            for path, im, im0s, vid_cap, s in dataset:
 
-            # HANDS TRACKER
-            mp_img = np.zeros((im.shape[2], im.shape[3], im.shape[1]),
-                              dtype=np.dtype('B'))
-            for i in range(im.shape[1]):
-                mp_img[:, :, i] = im[0, i, :, :]
-            hands_results = hands.process(mp_img)
+                # HANDS TRACKER
+                shape_len = len(im.shape)
+                mp_img = np.zeros((im.shape[shape_len-2], im.shape[shape_len-1], im.shape[shape_len-3]),
+                                  dtype=np.dtype('B'))
+                for i in range(im.shape[shape_len-3]):
+                    if shape_len == 4:
+                        mp_img[:, :, i] = im[0, i, :, :]
+                    elif shape_len == 3:
+                        mp_img[:, :, i] = im[i, :, :]
+                    else:
+                        raise ValueError(f'Image shape has length different from 3 or 4:\n'
+                                         f'\t shape: {im.shape}')
+                hands_results = hands.process(mp_img)
 
-            landmark_list = None
-            if hands_results.multi_hand_landmarks is not None:
-                for hand_landmarks, handedness in zip(
-                        hands_results.multi_hand_landmarks,
-                        hands_results.multi_handedness):
-                    # b_rect = calc_bounding_rect(mp_img, hand_landmarks)
-                    if handedness.classification[0].label == 'Left':
-                        landmark_list = calc_landmark_list(mp_img, hand_landmarks)
-                        pp_landmark_list = pre_process_landmark(landmark_list)
-                        pose_label, pose_probs = pose_class.predict(pp_landmark_list)
-                        close_prob = close_multiplier * pose_probs[1]
-                        if close_prob > 1:
-                            close_prob = 1
-                        close_cnt = close_max_cnt
+                landmark_list = None
+                if hands_results.multi_hand_landmarks is not None:
+                    for hand_landmarks, handedness in zip(
+                            hands_results.multi_hand_landmarks,
+                            hands_results.multi_handedness):
+                        # b_rect = calc_bounding_rect(mp_img, hand_landmarks)
+                        if handedness.classification[0].label == 'Left':
+                            landmark_list = calc_landmark_list(mp_img, hand_landmarks)
+                            pp_landmark_list = pre_process_landmark(landmark_list)
+                            pose_label, pose_probs = pose_class.predict(pp_landmark_list)
+                            close_prob = close_multiplier * pose_probs[1]
+                            if close_prob > 1:
+                                close_prob = 1
+                            close_cnt = close_max_cnt
 
-            close_cnt -= 1
-            if close_cnt < 0:
-                close_prob = 0
+                close_cnt -= 1
+                if close_cnt < 0:
+                    close_prob = 0
 
-            # OBJECT DETECTOR
-            im = torch.from_numpy(im).to(device)
-            im = im.half() if model.fp16 else im.float()  # uint8 to fp16/32
-            im /= 255  # 0 - 255 to 0.0 - 1.0
-            if len(im.shape) == 3:
-                im = im[None]  # expand for batch dim
+                # OBJECT DETECTOR
+                im = torch.from_numpy(im).to(device)
+                im = im.half() if model.fp16 else im.float()  # uint8 to fp16/32
+                im /= 255  # 0 - 255 to 0.0 - 1.0
+                if len(im.shape) == 3:
+                    im = im[None]  # expand for batch dim
 
-            visualize = increment_path(save_dir / Path(path).stem, mkdir=True) if visualize else False
-            pred = model(im, augment=augment, visualize=visualize)
+                visualize = increment_path(save_dir / Path(path).stem, mkdir=True) if visualize else False
+                pred = model(im, augment=augment, visualize=visualize)
 
-            # NMS
-            pred = non_max_suppression(pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det)
+                # NMS
+                pred = non_max_suppression(pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det)
 
-            # OBJECTS TRACKING
-            norfair_dets = yolo_detections_to_norfair_detections(pred[0], 'bbox')
-            tracked_objects = tracker.update(detections=norfair_dets, period=3)
+                # OBJECTS TRACKING
+                norfair_dets = yolo_detections_to_norfair_detections(pred[0], 'bbox')
+                tracked_objects = tracker.update(detections=norfair_dets, period=3)
 
-            norfair_bboxes = [obj.filter.x.squeeze()[:4] for obj in tracked_objects if obj.has_inertia]
+                norfair_bboxes = [obj.filter.x.squeeze()[:4] for obj in tracked_objects if obj.has_inertia]
 
-            prox_score, obj_idx = proximity_score(norfair_bboxes, landmarks_list=landmark_list)
-            grasp_prob, grasp_label = grasp_score(close_prob, prox_score)
+                prox_score, obj_idx = proximity_score(norfair_bboxes, landmarks_list=landmark_list)
+                grasp_prob, grasp_label = grasp_score(close_prob, prox_score)
 
-            try:
-                if obj_idx is not None and tracked_objects[obj_idx].id not in obj_label_dict:
-                    obj_label_dict.update({
-                        tracked_objects[obj_idx].id: names[int(tracked_objects[obj_idx].last_detection.data[0])]
-                    })
-                obj_label = obj_label_dict[tracked_objects[obj_idx].id] if obj_idx is not None else obj_label
-            except IndexError:
-                pass
-            obj_weight = CLASSES_NAMES[obj_label] if obj_label in CLASSES_NAMES else 0
-            output_weight = obj_weight if grasp_score.is_grasping else 0
-            visualized_weight = smoother(output_weight)
+                try:
+                    if obj_idx is not None:
+                        if tracked_objects[obj_idx].id not in obj_label_dict:
+                            obj_label_dict.update({
+                                tracked_objects[obj_idx].id: names[int(tracked_objects[obj_idx].last_detection.data[0])]
+                            })
+                        obj_label = obj_label_dict[tracked_objects[obj_idx].id]
+                except IndexError:
+                    pass
+                obj_weight = CLASSES_NAMES[obj_label] if obj_label in CLASSES_NAMES else 0
+                output_weight = obj_weight if grasp_score.is_grasping else 0
+                visualized_weight = smoother(output_weight)
 
-            try:
-                output_queue.put(output_weight, block=False)
-            except Full:
-                pass
+                try:
+                    output_queue.put(output_weight, block=False)
+                except Full:
+                    pass
 
-            # Second-stage classifier (optional)
-            # pred = utils.general.apply_classifier(pred, classifier_model, im, im0s)
+                # Second-stage classifier (optional)
+                # pred = utils.general.apply_classifier(pred, classifier_model, im, im0s)
 
-            # Process predictions
-            for i, det in enumerate(pred):  # per image
-                seen += 1
-                if webcam:  # batch_size >= 1
-                    p, im0, frame = path[i], im0s[i].copy(), dataset.count
-                    # s += f'{i}: '
-                else:
-                    p, im0, frame = path, im0s.copy(), getattr(dataset, 'frame', 0)
+                # Process predictions
+                for i, det in enumerate(pred):  # per image
+                    seen += 1
+                    if webcam:  # batch_size >= 1
+                        p, im0, frame = path[i], im0s[i].copy(), dataset.count
+                        # s += f'{i}: '
+                    else:
+                        p, im0, frame = path, im0s.copy(), getattr(dataset, 'frame', 0)
 
-                p = Path(p)  # to Path
-                save_path = str(save_dir / p.name)  # im.jpg
-                txt_path = str(save_dir / 'labels' / p.stem) + ('' if dataset.mode == 'image' else f'_{frame}')  # im.txt
-                # s += '%gx%g ' % im.shape[2:]  # print string
-                gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  # normalization gain whwh
-                imc = im0.copy() if save_crop or save_no_draw else im0  # for save_crop
-                annotator = Annotator(im0, line_width=line_thickness, example=str(names))
-                if len(det):
-                    # Rescale boxes from img_size to im0 size
-                    det[:, :4] = scale_coords(im.shape[2:], det[:, :4], im0.shape).round()
+                    p = Path(p)  # to Path
+                    save_path = str(save_dir / p.name)  # im.jpg
+                    txt_path = str(save_dir / 'labels' / p.stem) + \
+                                  ('' if dataset.mode == 'image' else f'_{frame}')  # im.txt
+                    # s += '%gx%g ' % im.shape[2:]  # print string
+                    gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  # normalization gain whwh
+                    imc = im0.copy() if save_crop or save_no_draw else im0  # for save_crop
+                    annotator = Annotator(im0, line_width=line_thickness, example=str(names))
+                    if len(det):
+                        # Rescale boxes from img_size to im0 size
+                        det[:, :4] = scale_coords(im.shape[2:], det[:, :4], im0.shape).round()
 
-                    # Write results
-                    for *xyxy, conf, cls in reversed(det):
-                        if save_txt:  # Write to file
-                            xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()  # normalized xywh
-                            line = (cls, *xywh, conf) if save_conf else (cls, *xywh)  # label format
-                            with open(txt_path + '.txt', 'a') as f:
-                                f.write(('%g ' * len(line)).rstrip() % line + '\n')
+                        # Write results
+                        for *xyxy, conf, cls in reversed(det):
+                            if save_txt:  # Write to file
+                                xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()
+                                line = (cls, *xywh, conf) if save_conf else (cls, *xywh)  # label format
+                                with open(txt_path + '.txt', 'a') as f:
+                                    f.write(('%g ' * len(line)).rstrip() % line + '\n')
 
-                        if save_img or save_crop or view_img:  # Add bbox to image
-                            c = int(cls)  # integer class
-                            label = None if hide_labels else (names[c] if hide_conf else f'{names[c]} {conf:.2f}')
-                            annotator.box_label(xyxy, label, color=colors(c, True))
-                            if save_crop:
-                                save_one_box(xyxy, imc, file=save_dir / 'crops' / names[c] / f'{p.stem}.jpg', BGR=True)
+                            if save_img or save_crop or view_img:  # Add bbox to image
+                                c = int(cls)  # integer class
+                                label = None if hide_labels else (names[c] if hide_conf else f'{names[c]} {conf:.2f}')
+                                annotator.box_label(xyxy, label, color=colors(c, True))
+                                if save_crop:
+                                    save_one_box(xyxy,
+                                                 imc,
+                                                 file=save_dir / 'crops' / names[c] / f'{p.stem}.jpg',
+                                                 BGR=True)
 
-                fps = fps_counter.get()
+                    fps = fps_counter.get()
 
-                # Stream results
-                im0 = annotator.result()
+                    # Stream results
+                    im0 = annotator.result()
 
-                if view_img:
-                    if hands_results.multi_hand_landmarks:
-                        for idx, hand_landmarks in enumerate(hands_results.multi_hand_landmarks):
-                            mp_drawing.draw_landmarks(
-                                im0,
-                                hand_landmarks,
-                                mp_hands.HAND_CONNECTIONS,
-                                mp_styles.get_default_hand_landmarks_style(),
-                                mp_styles.get_default_hand_connections_style(),
+                    if view_img:
+                        if hands_results.multi_hand_landmarks:
+                            for idx, hand_landmarks in enumerate(hands_results.multi_hand_landmarks):
+                                mp_drawing.draw_landmarks(
+                                    im0,
+                                    hand_landmarks,
+                                    mp_hands.HAND_CONNECTIONS,
+                                    mp_styles.get_default_hand_landmarks_style(),
+                                    mp_styles.get_default_hand_connections_style(),
+                                )
+
+                        weight_score_bar_kwargs = {
+                            'fill': visualized_weight / MAX_WEIGHT,
+                            'lower_corner': (5, 30),
+                            'custom_label': f'{obj_label}' if grasp_score.is_grasping else f'No object',
+                            'centered_custom_label': f'{visualized_weight:.2f} kg',
+                            'low_color': 120,
+                            'high_color': 90,
+                        }
+
+                        grasp_score_bar_kwargs = {
+                            'fill': grasp_prob,
+                            'lower_corner': (5, 60),
+                            'custom_label': f'Grasp',
+                        }
+
+                        if save_no_draw:
+                            imc = nice_text(imc, f'fps: {fps:.1f}', (imc.shape[1] - 100, imc.shape[0] - 5))
+                            imc = score_bar(
+                                imc,
+                                **weight_score_bar_kwargs,
+                            )
+                            imc = score_bar(
+                                imc,
+                                **grasp_score_bar_kwargs,
                             )
 
-                    cv2.putText(im0, f'fps: {fps:.1f}', (im0.shape[1] - 100, im0.shape[0] - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3)
-                    cv2.putText(im0, f'fps: {fps:.1f}', (im0.shape[1] - 100, im0.shape[0] - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                        im0 = nice_text(im0, f'fps: {fps:.1f}', (im0.shape[1] - 100, im0.shape[0] - 5))
+                        im0 = score_bar(
+                            im0,
+                            **weight_score_bar_kwargs
+                        )
+                        im0 = score_bar(
+                            im0,
+                            **grasp_score_bar_kwargs
+                        )
+
+                        if show_debug:
+                            im0 = score_bar(
+                                im0,
+                                prox_score,
+                                lower_corner=(5, 90),
+                                custom_label='Prox',
+                                use_value=True,
+                                single_color=(100, 255, 100),
+                            )
+                            im0 = score_bar(
+                                im0,
+                                close_prob,
+                                lower_corner=(5, 120),
+                                custom_label='Close',
+                                use_value=True,
+                                single_color=(255, 100, 100),
+                            )
+
+                        # draw_tracked_boxes(im0, tracked_objects, (255, 0, 0), 1, 1.5, 2)
+                        cv2.imshow(str(p), im0)
+                        cv2.waitKey(1)  # 1 millisecond
+
+                    # Save results (image with detections)
+                    if save_img:
+                        if dataset.mode == 'image':
+                            cv2.imwrite(save_path, im0)
+                        else:  # 'video' or 'stream'
+                            if vid_path[i] != save_path:  # new video
+                                vid_path[i] = save_path
+                                if isinstance(vid_writer[i], cv2.VideoWriter):
+                                    vid_writer[i].release()  # release previous video writer
+                                if vid_cap:  # video
+                                    fps = vid_cap.get(cv2.CAP_PROP_FPS)
+                                    w = int(vid_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                                    h = int(vid_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                                else:  # stream
+                                    fps, w, h = 30, im0.shape[1], im0.shape[0]
+                                save_path = str(Path(save_path).with_suffix('.mp4'))  # force *.mp4 suffix on results videos
+                                vid_writer[i] = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
+                            vid_writer[i].write(im0)
 
                     if save_no_draw:
-                        cv2.putText(imc, f'FPS: {fps:.1f}', (im0.shape[1] - 100, im0.shape[0] - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3)
-                        cv2.putText(imc, f'FPS: {fps:.1f}', (im0.shape[1] - 100, im0.shape[0] - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-                        imc = score_bar(
-                            visualized_weight / MAX_WEIGHT,
-                            imc,
-                            lower_corner=(5, 30),
-                            width=24,
-                            height=200,
-                            custom_label=f'{obj_label}' if grasp_score.is_grasping else f'No object',
-                            horizontal=True,
-                            char_size=0.6,
-                            with_centered_fill_value=True,
-                            centered_custom_label=f'{visualized_weight:.2f} kg',
-                            colormap=True,
-                            low_color=120,
-                            high_color=90,
-                        )
-                        imc = score_bar(
-                            grasp_prob,
-                            imc,
-                            lower_corner=(5, 60),
-                            width=24,
-                            height=200,
-                            custom_label=f'Grasp',
-                            horizontal=True,
-                            char_size=0.6,
-                            with_centered_fill_value=True,
-                        )
+                        if video_writer is None:
+                            video_path = str(Path(save_path)) + '_nodraw.mp4'
+                            video_writer = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
+                        video_writer.write(imc)
 
-                    im0 = score_bar(
-                        visualized_weight / MAX_WEIGHT,
-                        im0,
-                        lower_corner=(5, 30),
-                        width=24,
-                        height=200,
-                        custom_label=f'{obj_label}' if grasp_score.is_grasping else f'No object',
-                        horizontal=True,
-                        char_size=0.6,
-                        with_centered_fill_value=True,
-                        centered_custom_label=f'{visualized_weight:.2f} kg',
-                        colormap=True,
-                        low_color=120,
-                        high_color=90,
-                    )
-                    im0 = score_bar(
-                        grasp_prob,
-                        im0,
-                        lower_corner=(5, 60),
-                        width=24,
-                        height=200,
-                        custom_label=f'Grasp',
-                        horizontal=True,
-                        char_size=0.6,
-                        with_centered_fill_value=True,
-                    )
+                    if save_label_file:
+                        if label_file is None:
+                            label_file = open(f'{source[:-4]}_pred.csv', 'w')
+                        if csv_writer is None:
+                            csv_writer = csv.DictWriter(
+                                label_file,
+                                ('grasp', 'label')
+                            )
+                            csv_writer.writeheader()
+                        csv_writer.writerow({
+                            'grasp': f'{grasp_prob:.3f}',
+                            'label': f'{obj_label if obj_label is not None else "None"}',
+                        })
 
-                    if show_debug:
-                        im0 = score_bar(
-                            prox_score,
-                            im0,
-                            lower_corner=(5, 90),
-                            width=24,
-                            height=200,
-                            custom_label='Prox',
-                            horizontal=True,
-                            char_size=0.6,
-                            with_centered_fill_value=True,
-                            use_value=True,
-                            single_color=(100, 255, 100),
-                        )
-                        im0 = score_bar(
-                            close_prob,
-                            im0,
-                            lower_corner=(5, 120),
-                            width=24,
-                            height=200,
-                            custom_label='Close',
-                            horizontal=True,
-                            char_size=0.6,
-                            with_centered_fill_value=True,
-                            use_value=True,
-                            single_color=(255, 100, 100),
-                        )
-
-                    # draw_tracked_boxes(im0, tracked_objects, (255, 0, 0), 1, 1.5, 2)
-                    cv2.imshow(str(p), im0)
-                    cv2.waitKey(1)  # 1 millisecond
-
-                # Save results (image with detections)
-                if save_img:
-                    if dataset.mode == 'image':
-                        cv2.imwrite(save_path, im0)
-                    else:  # 'video' or 'stream'
-                        if vid_path[i] != save_path:  # new video
-                            vid_path[i] = save_path
-                            if isinstance(vid_writer[i], cv2.VideoWriter):
-                                vid_writer[i].release()  # release previous video writer
-                            if vid_cap:  # video
-                                fps = vid_cap.get(cv2.CAP_PROP_FPS)
-                                w = int(vid_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                                h = int(vid_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                            else:  # stream
-                                fps, w, h = 30, im0.shape[1], im0.shape[0]
-                            save_path = str(Path(save_path).with_suffix('.mp4'))  # force *.mp4 suffix on results videos
-                            vid_writer[i] = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
-                        vid_writer[i].write(im0)
-
-                if save_no_draw:
-                    if video_writer is None:
-                        video_path = str(Path(save_path)) + '_nodraw.mp4'
-                        video_writer = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
-                    video_writer.write(imc)
-
-            # Print time (inference-only)
-            # LOGGER.info(f'{s}Done. ({t3 - t2:.3f}s)')
+                # Print time (inference-only)
+                # LOGGER.info(f'{s}Done. ({t3 - t2:.3f}s)')
+    finally:
+        try:
+            label_file.close()
+        except AttributeError:
+            pass
 
     # Print results
     # t = tuple(x / seen * 1E3 for x in dt)  # speeds per image
@@ -487,7 +488,8 @@ def parse_opt():
     parser.add_argument('--save-conf', action='store_true', help='save confidences in --save-txt labels')
     parser.add_argument('--save-crop', action='store_true', help='save cropped prediction boxes')
     parser.add_argument('--save', action='store_true', help='save images/videos')
-    parser.add_argument('--classes', nargs='+', type=int, default=CLASSES, help='filter by class: --classes 0, or --classes 0 2 3')
+    parser.add_argument('--classes', nargs='+', type=int, default=CLASSES,
+                        help='filter by class: --classes 0, or --classes 0 2 3')
     parser.add_argument('--agnostic-nms', action='store_true', help='class-agnostic NMS')
     parser.add_argument('--augment', action='store_true', help='augmented inference')
     parser.add_argument('--visualize', action='store_true', help='visualize features')
@@ -503,9 +505,12 @@ def parse_opt():
     parser.add_argument('--use_static_image_mode', action='store_true')
     parser.add_argument("--hand-detection-confidence", help='min_detection_confidence', type=float, default=0.6)
     parser.add_argument("--hand-tracking-confidence", help='min_tracking_confidence', type=float, default=0.35)
-    parser.add_argument("--save-no-draw", help='save video without debugging drawing', action='store_true', default=False)
-    parser.add_argument("--show-debug", help='show close and prox value with bars on screen', action='store_true', default=False)
+    parser.add_argument("--save-no-draw", help='save video without yolo bboxes and mp hands',
+                        action='store_true', default=False)
+    parser.add_argument("--show-debug", help='show close and prox score bars', action='store_true', default=False)
     parser.add_argument("--server", help='send out result on 127.0.0.1, port 11000', action='store_true', default=False)
+    parser.add_argument("--save-label-file", help='save grasp results in a txt file',
+                        action='store_true', default=False)
     opt = parser.parse_args()
     opt.imgsz *= 2 if len(opt.imgsz) == 1 else 1  # expand
     print_args(vars(opt))
@@ -523,7 +528,7 @@ def send_result(input_queue: Queue, rate: float):
             val = input_queue.get()
         if val is not None:
             cnt += 1
-            sock.sendto(struct.pack('f', val), ('127.0.0.1', 11000))
+            sock.sendto(struct.pack('f', val), (OUTPUT_IP, OUTPUT_PORT))
             if cnt % int(rate) == 0:
                 print(f'[{time.strftime("%H:%M:%S")}] Weight: {val:.3f} kg')
         elapsed_time = time.time() - start_time
@@ -540,6 +545,8 @@ def main(output_queue, opt):
 
 if __name__ == "__main__":
     args = parse_opt()
+    if args.save_label_file:
+        args.save = True
     data_queue = Queue()
     if args.server:
         t = Thread(
