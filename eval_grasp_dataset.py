@@ -71,7 +71,7 @@ class Result:
 
 
 def compare_files(true: str, pred: str) -> Dict[str, Result]:
-    result: Dict[str, Result] = {key: Result() for key in obj_labels}
+    result: Dict[str, Result] = {key: Result() for key in obj_labels if key != 'none'}
     grasp_hyst = GraspHysteresis()
     with open(true, 'r') as f:
         lines = len(f.readlines())
