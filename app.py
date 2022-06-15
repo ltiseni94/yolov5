@@ -74,16 +74,16 @@ OUTPUT_PORT = 11000
 CLASSES_NAMES = {
     'bottle': 1.0,
     'cup': 0.4,
-    'handbag': 1.5,
+    # 'handbag': 1.5,
     'cell phone': 0.25,
     'book': 0.5,
-    'fork': 0.1,
+    # 'fork': 0.1,
     # 'sports ball': 0.3,
     # 'wine glass': 0.2,
-    'spoon': 0.1,
-    'bowl': 0.7,
-    'apple': 0.3,
-    'banana': 0.3,
+    # 'spoon': 0.1,
+    # 'bowl': 0.7,
+    # 'apple': 0.3,
+    # 'banana': 0.3,
     'orange': 0.4,
     # 'carrot': 0.1,
     # 'remote': 0.2,
@@ -186,7 +186,7 @@ def run(
     pose_class = PoseClassifier()
     grasp_score = GraspScore(close_weight=0.1,
                              proximity_weight=0.1,
-                             conf_thres=0.7,
+                             conf_thres=0.6,
                              release_thres=0.5)
     proximity_score = ProximityScore(holding_samples=30)
     tracker = Tracker(distance_function=euclidean_distance,
@@ -245,16 +245,17 @@ def run(
                 if hands_results.multi_hand_landmarks is not None:
                     for hand_landmarks, handedness in zip(
                             hands_results.multi_hand_landmarks,
-                            hands_results.multi_handedness):
+                            hands_results.multi_handedness
+                    ):
                         # b_rect = calc_bounding_rect(mp_img, hand_landmarks)
-                        if handedness.classification[0].label == 'Left':
-                            landmark_list = calc_landmark_list(mp_img, hand_landmarks)
-                            pp_landmark_list = pre_process_landmark(landmark_list)
-                            pose_label, pose_probs = pose_class.predict(pp_landmark_list)
-                            close_prob = close_multiplier * pose_probs[1]
-                            if close_prob > 1:
-                                close_prob = 1
-                            close_cnt = close_max_cnt
+                        # if handedness.classification[0].label == 'Left':
+                        landmark_list = calc_landmark_list(mp_img, hand_landmarks)
+                        pp_landmark_list = pre_process_landmark(landmark_list)
+                        pose_label, pose_probs = pose_class.predict(pp_landmark_list)
+                        close_prob = close_multiplier * pose_probs[1]
+                        if close_prob > 1:
+                            close_prob = 1
+                        close_cnt = close_max_cnt
 
                 close_cnt -= 1
                 if close_cnt < 0:
@@ -289,6 +290,7 @@ def run(
                                 tracked_objects[obj_idx].id: names[int(tracked_objects[obj_idx].last_detection.data[0])]
                             })
                         obj_label = obj_label_dict[tracked_objects[obj_idx].id]
+                        # obj_label = names[int(tracked_objects[obj_idx].last_detection.data[0])]
                 except IndexError:
                     pass
                 obj_weight = CLASSES_NAMES[obj_label] if obj_label in CLASSES_NAMES else 0
@@ -547,6 +549,7 @@ if __name__ == "__main__":
     args = parse_opt()
     if args.save_label_file:
         args.save = True
+        args.view_img = True
     data_queue = Queue()
     if args.server:
         t = Thread(

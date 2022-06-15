@@ -1,6 +1,7 @@
 import cv2
 import argparse
 import csv
+import os
 from grasp import nice_text
 
 
@@ -8,14 +9,14 @@ obj_labels = (
     'none',
     'bottle',
     'cup',
-    'handbag',
+    # 'handbag',
     'cell phone',
     'book',
-    'fork',
-    'spoon',
-    'bowl',
-    'apple',
-    'banana',
+    # 'fork',
+    # 'spoon',
+    # 'bowl',
+    # 'apple',
+    # 'banana',
     'orange',
 )
 
@@ -29,14 +30,14 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
-    if args.output is None:
-        args.output = args.video[:-4] + '_true.csv'
-    if args.input_label is None:
-        args.input_label = args.output
+def main(
+        video: str,
+        output: str,
+        input_label: str,
+        read_only: bool,
+) -> None:
 
-    cap = cv2.VideoCapture(args.video)
+    cap = cv2.VideoCapture(video)
     orig_frames = []
 
     while True:
@@ -54,7 +55,7 @@ def main() -> None:
     labels = []
     input_file = None
     try:
-        input_file = open(args.input_label, 'r')
+        input_file = open(input_label, 'r')
     except FileNotFoundError:
         labels = [0] * len(orig_frames)
         last_label = 0
@@ -70,24 +71,24 @@ def main() -> None:
 
     def change_frame(x):
         nonlocal frame_idx, labels
-        frame_idx = cv2.getTrackbarPos('frame', f'{args.video}')
-        if not args.read_only:
+        frame_idx = cv2.getTrackbarPos('frame', f'{video}')
+        if not read_only:
             if hold:
                 labels[frame_idx] = last_label
-            cv2.setTrackbarPos('obj_label', f'{args.video}', labels[frame_idx])
+            cv2.setTrackbarPos('obj_label', f'{video}', labels[frame_idx])
         draw_image()
 
     def change_label(x):
         nonlocal labels, last_label
-        labels[frame_idx] = cv2.getTrackbarPos('obj_label', f'{args.video}')
+        labels[frame_idx] = cv2.getTrackbarPos('obj_label', f'{video}')
         if hold:
             last_label = labels[frame_idx]
         draw_image()
 
     def change_hold(x):
         nonlocal hold, last_label
-        last_label = cv2.getTrackbarPos('obj_label', f'{args.video}')
-        if cv2.getTrackbarPos('hold', f'{args.video}') == 1:
+        last_label = cv2.getTrackbarPos('obj_label', f'{video}')
+        if cv2.getTrackbarPos('hold', f'{video}') == 1:
             hold = True
         else:
             hold = False
@@ -96,15 +97,15 @@ def main() -> None:
         frame = orig_frames[frame_idx].copy()
         if labels[frame_idx] > 0:
             frame = nice_text(frame, f'{obj_labels[labels[frame_idx]]}', (10, 20))
-        cv2.imshow(f'{args.video}', frame)
+        cv2.imshow(f'{video}', frame)
 
-    cv2.namedWindow(f'{args.video}')
-    cv2.createTrackbar('frame', f'{args.video}', 0, len(orig_frames) - 1, change_frame)
-    if not args.read_only:
-        cv2.createTrackbar('obj_label', f'{args.video}', 0, 11, change_label)
-        cv2.createTrackbar('hold', f'{args.video}', 0, 1, change_hold)
+    cv2.namedWindow(f'{video}')
+    cv2.createTrackbar('frame', f'{video}', 0, len(orig_frames) - 1, change_frame)
+    if not read_only:
+        cv2.createTrackbar('obj_label', f'{video}', 0, len(obj_labels) - 1, change_label)
+        cv2.createTrackbar('hold', f'{video}', 0, 1, change_hold)
     draw_image()
-    if args.read_only:
+    if read_only:
         print('Press Enter or ctrl + C to terminate')
     else:
         print('Press Enter if you want to save, ctrl + C to abort')
@@ -112,8 +113,8 @@ def main() -> None:
         pass
     cv2.destroyAllWindows()
 
-    if not args.read_only:
-        with open(args.output, 'w') as f:
+    if not read_only:
+        with open(output, 'w') as f:
             csv_writer = csv.DictWriter(f, ('grasp', 'label'))
             csv_writer.writeheader()
             for label in labels:
@@ -125,4 +126,19 @@ def main() -> None:
 
 
 if __name__ == '__main__':
-    main()
+    args = parse_args()
+    if os.path.isdir(args.video):
+        videos = [args.video + '/' + video for video in os.listdir(args.video) if video.endswith('.mp4')]
+        for video in videos:
+            main(
+                video=video,
+                output=video[:-4] + '_true.csv',
+                input_label=video[:-4] + '_true.csv',
+                read_only=args.read_only
+            )
+    else:
+        if args.output is None:
+            args.output = args.video[:-4] + '_true.csv'
+        if args.input_label is None:
+            args.input_label = args.output
+        main(**vars(args))

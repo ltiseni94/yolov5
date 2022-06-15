@@ -1,6 +1,7 @@
 import os
 import csv
-from typing import Dict, Optional
+import json
+from typing import Dict
 from label_video import obj_labels
 
 
@@ -8,7 +9,7 @@ DATASET = 'grasp_dataset/'
 
 
 class GraspHysteresis:
-    def __init__(self, low: float = 0.5, high: float = 0.7):
+    def __init__(self, low: float = 0.45, high: float = 0.68):
         self.bool: bool = False
         self.low: float = low
         self.high: float = high
@@ -26,8 +27,6 @@ class Result:
         self.true_pos: int = true_pos
         self.false_pos: int = false_pos
         self.false_neg: int = false_neg
-        self._recall: Optional[float] = None
-        self._precision: Optional[float] = None
 
     def __add__(self, other):
         if not isinstance(other, self.__class__):
@@ -44,6 +43,7 @@ class Result:
         self.true_pos += other.true_pos
         self.false_pos += other.false_pos
         self.false_neg += other.false_neg
+        return self
 
     def __repr__(self):
         p_string = f'{None}'
@@ -68,6 +68,39 @@ class Result:
             return self.true_pos / (self.true_pos + self.false_pos)
         except ZeroDivisionError:
             return None
+
+
+class ResultSerializer(json.JSONEncoder):
+    def default(self, o):
+        if isinstance(o, Result):
+            res = o.__dict__.copy()
+            res.update({'precision': o.precision, 'recall': o.recall})
+            return res
+        return super().default(o)
+
+
+def sum_dict(*dicts: Dict[str, Result]) -> Dict[str, Result]:
+    if len(dicts) == 0:
+        raise ValueError('At least one input dictionary is required')
+
+    if not all(map(lambda x: type(x) == dict, dicts)):
+        raise TypeError('Some input element is not a dictionary')
+
+    for d in dicts:
+        if not all(map(lambda x: x in d, obj_labels[1:])):
+            raise ValueError('Missing label in input dictionary')
+        if 'total' not in d:
+            raise ValueError('Missing label "total" in input dictionary')
+        if not all(map(lambda x: type(x) == Result, d.values())):
+            raise TypeError('Some input dictionary has '
+                            'a value that is not a Result')
+
+    result = {key: Result() for key in dicts[0]}
+    for d in dicts:
+        for key in result:
+            result[key] += d[key]
+
+    return result
 
 
 def compare_files(true: str, pred: str) -> Dict[str, Result]:
@@ -96,6 +129,11 @@ def compare_files(true: str, pred: str) -> Dict[str, Result]:
                             result[pred_row['label']].false_pos += 1
                         else:
                             result[true_row['label']].true_pos += 1
+    result.update({'total': Result(
+        true_pos=sum([result[key].true_pos for key in obj_labels if key != 'none']),
+        false_pos=sum([result[key].false_pos for key in obj_labels if key != 'none']),
+        false_neg=sum([result[key].false_neg for key in obj_labels if key != 'none']),
+    )})
     return result
 
 
@@ -104,17 +142,27 @@ def main() -> None:
     videos = [video for video in dataset if video.endswith('.mp4')]
 
     for video in videos:
-        pred_file = video.rstrip('.mp4') + '_pred.csv'
-        true_file = video.rstrip('.mp4') + '_true.csv'
+        pred_file = video[:-4] + '_pred.csv'
+        true_file = video[:-4] + '_true.csv'
         if not (pred_file in dataset and true_file in dataset):
-            raise ValueError('Missing labels in dataset')
+            raise ValueError(f'Missing labels in dataset: {pred_file}, {true_file}')
 
     results = [compare_files(
-        true=DATASET + video.rstrip('.mp4') + '_true.csv',
-        pred=DATASET + video.rstrip('.mp4') + '_pred.csv',
+        true=DATASET + video[:-4] + '_true.csv',
+        pred=DATASET + video[:-4] + '_pred.csv',
     ) for video in videos]
 
-    print(results)
+    aggregate_result = sum_dict(*results)
+    aggregate_result_json = json.dumps(aggregate_result, indent=2, cls=ResultSerializer)
+
+    with open('grasp_dataset/aggregate.json', 'w') as f:
+        f.write(aggregate_result_json)
+
+    for idx, result in enumerate(results):
+        with open(f'grasp_dataset/exp_{idx}.json', 'w') as f:
+            f.write(json.dumps(
+                result, indent=2, cls=ResultSerializer
+            ))
 
 
 if __name__ == '__main__':

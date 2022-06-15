@@ -15,13 +15,13 @@ def main():
 
     if output is None:
         videos = [video for video in os.listdir('grasp_dataset')
-                  if video.endswith('.mp4') and video.startswith('participant_')]
-        ids = [int(video.lstrip('participant_').rstrip('.mp4')) for video in videos]
+                  if video.endswith('.mp4') and video.startswith('exp_')]
+        ids = [int(video.lstrip('exp_').rstrip('.mp4')) for video in videos]
         if len(ids) > 0:
             new_id = max(ids) + 1
         else:
             new_id = 0
-        output = f'grasp_dataset/participant_{new_id}.mp4'
+        output = f'grasp_dataset/exp_{new_id}.mp4'
     else:
         if not output.endswith('.mp4'):
             output += '.mp4'
