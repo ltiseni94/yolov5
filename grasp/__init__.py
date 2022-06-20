@@ -20,7 +20,8 @@ class GraspScore:
         self.pw = proximity_weight
         self.mw = 1 - close_weight - proximity_weight
         self.is_grasping = False
-        assert 1 > self.mw > 0
+        if not 1 > self.mw > 0:
+            raise ValueError('Sum of proximity weight and close weight must be more than 0 and less than 1')
 
     def __call__(self, close_prob, prox_score):
         self.reset_counter += 1
