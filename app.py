@@ -187,7 +187,7 @@ def run(
     grasp_score = GraspScore(close_weight=0.1,
                              proximity_weight=0.1,
                              conf_thres=0.6,
-                             release_thres=0.5)
+                             release_thres=0.45)
     proximity_score = ProximityScore(holding_samples=30)
     tracker = Tracker(distance_function=euclidean_distance,
                       distance_threshold=max_distance_between_points,
@@ -349,7 +349,7 @@ def run(
                     # Stream results
                     im0 = annotator.result()
 
-                    if view_img:
+                    if view_img or save:
                         if hands_results.multi_hand_landmarks:
                             for idx, hand_landmarks in enumerate(hands_results.multi_hand_landmarks):
                                 mp_drawing.draw_landmarks(
@@ -415,8 +415,9 @@ def run(
                             )
 
                         # draw_tracked_boxes(im0, tracked_objects, (255, 0, 0), 1, 1.5, 2)
-                        cv2.imshow(str(p), im0)
-                        cv2.waitKey(1)  # 1 millisecond
+                        if view_img:
+                            cv2.imshow(str(p), im0)
+                            cv2.waitKey(1)  # 1 millisecond
 
                     # Save results (image with detections)
                     if save_img:
@@ -481,8 +482,8 @@ def parse_opt():
     parser.add_argument('--source', type=str, default=ROOT / 'data/images', help='file/dir/URL/glob, 0 for webcam')
     parser.add_argument('--data', type=str, default=ROOT / 'data/coco128.yaml', help='(optional) dataset.yaml path')
     parser.add_argument('--imgsz', '--img', '--img-size', nargs='+', type=int, default=[640], help='inference size h,w')
-    parser.add_argument('--conf-thres', type=float, default=0.25, help='confidence threshold')
-    parser.add_argument('--iou-thres', type=float, default=0.45, help='NMS IoU threshold')
+    parser.add_argument('--conf-thres', type=float, default=0.2, help='confidence threshold')
+    parser.add_argument('--iou-thres', type=float, default=0.2, help='NMS IoU threshold')
     parser.add_argument('--max-det', type=int, default=1000, help='maximum detections per image')
     parser.add_argument('--device', default='', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
     parser.add_argument('--view-img', action='store_true', help='show results')
@@ -492,7 +493,7 @@ def parse_opt():
     parser.add_argument('--save', action='store_true', help='save images/videos')
     parser.add_argument('--classes', nargs='+', type=int, default=CLASSES,
                         help='filter by class: --classes 0, or --classes 0 2 3')
-    parser.add_argument('--agnostic-nms', action='store_true', help='class-agnostic NMS')
+    parser.add_argument('--agnostic-nms', action='store_true', default=True, help='class-agnostic NMS')
     parser.add_argument('--augment', action='store_true', help='augmented inference')
     parser.add_argument('--visualize', action='store_true', help='visualize features')
     parser.add_argument('--update', action='store_true', help='update all models')
@@ -549,7 +550,6 @@ if __name__ == "__main__":
     args = parse_opt()
     if args.save_label_file:
         args.save = True
-        args.view_img = True
     data_queue = Queue()
     if args.server:
         t = Thread(
