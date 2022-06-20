@@ -9,7 +9,7 @@ DATASET = 'grasp_dataset/'
 
 
 class GraspHysteresis:
-    def __init__(self, low: float = 0.45, high: float = 0.68):
+    def __init__(self, low: float = 0.51, high: float = 0.6):
         self.bool: bool = False
         self.low: float = low
         self.high: float = high
