@@ -140,6 +140,7 @@ def compare_files(true: str, pred: str) -> Dict[str, Result]:
 def main() -> None:
     dataset = os.listdir(DATASET)
     videos = [video for video in dataset if video.endswith('.mp4')]
+    videos = sorted(videos, key=lambda x: int(x[:-4].lstrip('exp_')))
 
     for video in videos:
         pred_file = video[:-4] + '_pred.csv'
@@ -152,11 +153,18 @@ def main() -> None:
         pred=DATASET + video[:-4] + '_pred.csv',
     ) for video in videos]
 
+    participants_result = [sum_dict(*results[i * 5: (i + 1) * 5]) for i in range(len(videos) // 5)]
+    participants_result_json = [json.dumps(res, indent=2, cls=ResultSerializer) for res in participants_result]
+
     aggregate_result = sum_dict(*results)
     aggregate_result_json = json.dumps(aggregate_result, indent=2, cls=ResultSerializer)
 
     with open('grasp_dataset/aggregate.json', 'w') as f:
         f.write(aggregate_result_json)
+
+    for idx, json_dump in enumerate(participants_result_json):
+        with open(f'grasp_dataset/participant_{idx}.json', 'w') as f:
+            f.write(json_dump)
 
     for idx, result in enumerate(results):
         with open(f'grasp_dataset/exp_{idx}.json', 'w') as f:

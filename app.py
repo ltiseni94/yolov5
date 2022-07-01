@@ -187,7 +187,7 @@ def run(
     grasp_score = GraspScore(close_weight=0.1,
                              proximity_weight=0.1,
                              conf_thres=0.6,
-                             release_thres=0.45)
+                             release_thres=0.51)
     proximity_score = ProximityScore(holding_samples=30)
     tracker = Tracker(distance_function=euclidean_distance,
                       distance_threshold=max_distance_between_points,
@@ -541,7 +541,7 @@ def send_result(input_queue: Queue, rate: float):
             pass
 
 
-def main(output_queue, opt):
+def main(output_queue: Queue, opt):
     check_requirements(exclude=('tensorboard', 'thop'))
     run(output_queue, **vars(opt))
 

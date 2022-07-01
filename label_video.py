@@ -27,6 +27,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--output', '-o', help='output path', default=None)
     parser.add_argument('--input-label', '-i', default=None)
     parser.add_argument('--read-only', '-r', action='store_true', default=False)
+    parser.add_argument('--new-only', '-n', action='store_true', default=False)
     return parser.parse_args()
 
 
@@ -128,7 +129,16 @@ def main(
 if __name__ == '__main__':
     args = parse_args()
     if os.path.isdir(args.video):
-        videos = [args.video + '/' + video for video in os.listdir(args.video) if video.endswith('.mp4')]
+        if not args.video.endswith('/'):
+            args.video += '/'
+        videos = [args.video + video for video in os.listdir(args.video) if video.endswith('.mp4')]
+        if args.new_only:
+            labels = [args.video + label for label in os.listdir(args.video) if label.endswith('_true.csv')]
+            for label in labels:
+                try:
+                    videos.remove(f'{label.rstrip("_true.csv")}.mp4')
+                except ValueError:
+                    pass
         for video in videos:
             main(
                 video=video,
